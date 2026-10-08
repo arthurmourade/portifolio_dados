@@ -70,3 +70,4 @@ nomes = ["Ana", "Caio", "Bia"]
 
 for venda in vendas:
     print(vendas * 2)
+

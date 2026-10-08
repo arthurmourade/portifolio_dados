@@ -1,0 +1,14 @@
+id_cliente;nome;email;dt_cadastro;valor_compra;cidade;status
+1001;  Ana Souza ;ana.souza@email.com;2026-01-15;R$ 1.250,50;São Paulo;ATIVO
+1002;carlos LIMA;carlos.lima@email.com;16/01/2026;R$ 980,00;sao paulo;Ativo
+1003;Beatriz Alves;beatriz.alves@email;2026-01-17;R$ 2.310,90;Campinas;ativo 
+1004;Daniel Rocha;daniel.rocha@email.com;18/01/2026;;Santos;INATIVO
+1002;Carlos Lima;carlos.lima@email.com;16/01/2026;R$ 980,00;São Paulo;Ativo
+1005;Eduarda Martins;;2026-01-20;R$ 450,00;SÃO PAULO;ativo
+1006;fábio  Nunes;fabio.nunes@email.com;21/01/2026;R$ 1.000,00;Guarulhos;Ativo
+abc;Gabriela Dias;gabi.dias@email.com;2026-01-22;R$ 300,00;Campinas;ATIVO
+1008;Henrique Costa;henrique.costa@email.com;32/01/2026;R$ 720,75;Santos;ativo
+1009;Isabela Ramos;isabela.ramos@email.com;2026-01-25;R$ 15.000,00;Sao Paulo;Inativo
+1010;;joao.pereira@email.com;26/01/2026;R$ 610,00;Guarulhos;ATIVO
+1011;Karen Oliveira;karen.o@email.com;2026-01-27;-R$ 50,00;campinas;ativo
+1012;Lucas Prado;lucas.prado@email.com;;R$ 830,20;Santos;Ativo
