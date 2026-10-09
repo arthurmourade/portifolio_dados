@@ -1,0 +1,864 @@
+/* ============================================================================
+   BANCO BS2 — DASHBOARDS DE ATENDIMENTO (visual HTML Content)
+   Tabela: fato_genesys (Genesys -> Google BigQuery)
+   Identidade visual: Brandbook BS2 — Azul #1226AA | Azul ultramarino #090E29
+                      Rosa #FF3366 | Branco quente #FAFAFA
+   Entrega: 2 relatorios
+     A) [BS2 Dash Consolidado HTML]   — visao executiva consolidada
+     B) [BS2 Dash Sinais Vitais HTML] — painel operacional de atendentes
+   Criar TODAS as medidas na tabela fato_genesys, NA ORDEM ABAIXO.
+   ============================================================================ */
+
+
+/* =========================================================================
+   BLOCO 1 — MEDIDAS BASE (volume, TMA, comparativos)
+   ========================================================================= */
+
+Atendimentos Realizados =
+VAR _Qtd = DISTINCTCOUNT ( fato_genesys[conversation_id] )
+RETURN IF ( ISBLANK ( _Qtd ), 0, _Qtd )
+
+
+Atendentes Ativos =
+VAR _Qtd =
+    CALCULATE (
+        DISTINCTCOUNT ( fato_genesys[participant_name] ),
+        KEEPFILTERS ( NOT ISBLANK ( fato_genesys[participant_name] ) )
+    )
+RETURN IF ( ISBLANK ( _Qtd ), 0, _Qtd )
+
+
+Media Atendimentos por Atendente =
+DIVIDE ( [Atendimentos Realizados], [Atendentes Ativos] )
+
+
+TMA Segundos =
+AVERAGEX (
+    VALUES ( fato_genesys[conversation_id] ),
+    VAR _Ini = CALCULATE ( MIN ( fato_genesys[conversation_start] ) )
+    VAR _Fim = CALCULATE ( MAX ( fato_genesys[conversation_end] ) )
+    RETURN
+        IF (
+            NOT ISBLANK ( _Ini ) && NOT ISBLANK ( _Fim ) && _Fim >= _Ini,
+            DATEDIFF ( _Ini, _Fim, SECOND )
+        )
+)
+
+
+TMA Formatado =
+VAR _Seg = [TMA Segundos]
+VAR _H = INT ( DIVIDE ( _Seg, 3600 ) )
+VAR _M = INT ( DIVIDE ( MOD ( _Seg, 3600 ), 60 ) )
+VAR _S = INT ( MOD ( _Seg, 60 ) )
+RETURN
+    IF (
+        ISBLANK ( _Seg ),
+        "--:--:--",
+        FORMAT ( _H, "00" ) & ":" & FORMAT ( _M, "00" ) & ":" & FORMAT ( _S, "00" )
+    )
+
+
+/* TMA medio do portfolio — ignora o filtro de atendente para servir de referencia
+   na classificacao de status (PREMISSA: nao ha meta de TMA documentada).        */
+TMA Portfolio Segundos =
+CALCULATE ( [TMA Segundos], REMOVEFILTERS ( fato_genesys[participant_name] ) )
+
+
+Periodo Analisado =
+VAR _Ini = MIN ( fato_genesys[Data] )
+VAR _Fim = MAX ( fato_genesys[Data] )
+RETURN
+    IF (
+        ISBLANK ( _Ini ),
+        "Sem periodo",
+        FORMAT ( _Ini, "DD/MM/YYYY" ) & " a " & FORMAT ( _Fim, "DD/MM/YYYY" )
+    )
+
+
+/* --- Comparativo mensal (PREMISSA: sem Dim_Calendario; usa fato_genesys[Data]) --- */
+
+Atendimentos Mes Atual =
+VAR _U = MAX ( fato_genesys[Data] )
+VAR _I = EOMONTH ( _U, -1 ) + 1
+VAR _F = EOMONTH ( _U, 0 )
+RETURN
+    CALCULATE (
+        [Atendimentos Realizados],
+        REMOVEFILTERS ( fato_genesys[Data] ),
+        fato_genesys[Data] >= _I,
+        fato_genesys[Data] <= _F
+    )
+
+
+Atendimentos Mes Anterior =
+VAR _U = MAX ( fato_genesys[Data] )
+VAR _I = EOMONTH ( _U, -2 ) + 1
+VAR _F = EOMONTH ( _U, -1 )
+RETURN
+    CALCULATE (
+        [Atendimentos Realizados],
+        REMOVEFILTERS ( fato_genesys[Data] ),
+        fato_genesys[Data] >= _I,
+        fato_genesys[Data] <= _F
+    )
+
+
+Var % Atendimentos MoM =
+VAR _A = [Atendimentos Mes Atual]
+VAR _B = [Atendimentos Mes Anterior]
+RETURN IF ( _B = 0 || ISBLANK ( _B ), BLANK (), DIVIDE ( _A - _B, _B ) )
+
+
+TMA Mes Atual Segundos =
+VAR _U = MAX ( fato_genesys[Data] )
+VAR _I = EOMONTH ( _U, -1 ) + 1
+VAR _F = EOMONTH ( _U, 0 )
+RETURN
+    CALCULATE (
+        [TMA Segundos],
+        REMOVEFILTERS ( fato_genesys[Data] ),
+        fato_genesys[Data] >= _I,
+        fato_genesys[Data] <= _F
+    )
+
+
+TMA Mes Anterior Segundos =
+VAR _U = MAX ( fato_genesys[Data] )
+VAR _I = EOMONTH ( _U, -2 ) + 1
+VAR _F = EOMONTH ( _U, -1 )
+RETURN
+    CALCULATE (
+        [TMA Segundos],
+        REMOVEFILTERS ( fato_genesys[Data] ),
+        fato_genesys[Data] >= _I,
+        fato_genesys[Data] <= _F
+    )
+
+
+Var % TMA MoM =
+VAR _A = [TMA Mes Atual Segundos]
+VAR _B = [TMA Mes Anterior Segundos]
+RETURN IF ( _B = 0 || ISBLANK ( _B ), BLANK (), DIVIDE ( _A - _B, _B ) )
+
+
+/* --- Top canal / top departamento --- */
+
+Canal Mais Atendido =
+VAR _T = ADDCOLUMNS ( VALUES ( fato_genesys[media_type] ), "@Q", [Atendimentos Realizados] )
+VAR _N = MAXX ( TOPN ( 1, _T, [@Q], DESC, fato_genesys[media_type], ASC ), fato_genesys[media_type] )
+RETURN IF ( ISBLANK ( _N ), "Sem dados", _N )
+
+
+Qtd Canal Mais Atendido =
+VAR _T = ADDCOLUMNS ( VALUES ( fato_genesys[media_type] ), "@Q", [Atendimentos Realizados] )
+VAR _V = MAXX ( TOPN ( 1, _T, [@Q], DESC, fato_genesys[media_type], ASC ), [@Q] )
+RETURN IF ( ISBLANK ( _V ), 0, _V )
+
+
+% Canal Mais Atendido = DIVIDE ( [Qtd Canal Mais Atendido], [Atendimentos Realizados] )
+
+
+Departamento Mais Acionado =
+VAR _T = ADDCOLUMNS ( VALUES ( fato_genesys[department] ), "@Q", [Atendimentos Realizados] )
+VAR _N = MAXX ( TOPN ( 1, _T, [@Q], DESC, fato_genesys[department], ASC ), fato_genesys[department] )
+RETURN IF ( ISBLANK ( _N ), "Sem dados", _N )
+
+
+Qtd Departamento Mais Acionado =
+VAR _T = ADDCOLUMNS ( VALUES ( fato_genesys[department] ), "@Q", [Atendimentos Realizados] )
+VAR _V = MAXX ( TOPN ( 1, _T, [@Q], DESC, fato_genesys[department], ASC ), [@Q] )
+RETURN IF ( ISBLANK ( _V ), 0, _V )
+
+
+% Departamento Mais Acionado = DIVIDE ( [Qtd Departamento Mais Acionado], [Atendimentos Realizados] )
+
+
+/* --- Semaforo de atendentes (PREMISSA: limiares relativos a media do portfolio) ---
+   NORMAL    : TMA do atendente <  media do portfolio
+   MONITORAR : media <= TMA < 1,5 x media
+   CRITICO   : TMA >= 1,5 x media                                                  */
+
+Atendentes em Alerta =
+VAR _Ref = [TMA Portfolio Segundos]
+VAR _T =
+    ADDCOLUMNS (
+        CALCULATETABLE (
+            VALUES ( fato_genesys[participant_name] ),
+            KEEPFILTERS ( NOT ISBLANK ( fato_genesys[participant_name] ) )
+        ),
+        "@TMA", [TMA Segundos]
+    )
+VAR _Q = COUNTROWS ( FILTER ( _T, [@TMA] >= _Ref && [@TMA] < _Ref * 1.5 ) )
+RETURN IF ( ISBLANK ( _Q ), 0, _Q )
+
+
+Atendentes Criticos =
+VAR _Ref = [TMA Portfolio Segundos]
+VAR _T =
+    ADDCOLUMNS (
+        CALCULATETABLE (
+            VALUES ( fato_genesys[participant_name] ),
+            KEEPFILTERS ( NOT ISBLANK ( fato_genesys[participant_name] ) )
+        ),
+        "@TMA", [TMA Segundos]
+    )
+VAR _Q = COUNTROWS ( FILTER ( _T, [@TMA] >= _Ref * 1.5 ) )
+RETURN IF ( ISBLANK ( _Q ), 0, _Q )
+
+
+/* =========================================================================
+   BLOCO 2 — CSS BS2 (medida compartilhada pelos 2 relatorios)
+   ========================================================================= */
+
+BS2 CSS =
+VAR Q = UNICHAR ( 34 )
+RETURN
+    "<style>"
+        & ".bs2{font-family:" & Q & "Segoe UI" & Q & ",Calibri,Arial,sans-serif;background:#FAFAFA;padding:14px;color:#090E29;}"
+        & ".bs2 *{box-sizing:border-box;}"
+        & ".hd{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #1226AA;padding-bottom:9px;margin-bottom:12px;}"
+        & ".hd h1{margin:0;font-size:26px;font-weight:700;color:#1226AA;letter-spacing:-.2px;}"
+        & ".hd h1 span{color:#090E29;font-weight:400;}"
+        & ".hd .sub{margin:2px 0 0 0;font-size:14px;color:#6B7280;}"
+        & ".lg{display:flex;gap:14px;align-items:center;font-size:12.5px;color:#6B7280;}"
+        & ".lg i{display:inline-block;width:9px;height:11px;border-radius:2px;margin-right:4px;vertical-align:-1px;}"
+        & ".pill{border-radius:10px;padding:2px 8px;font-size:12.5px;font-weight:600;}"
+        & ".pos{background:#E4F6EF;color:#17A673;}"
+        & ".neg{background:#FFE8EE;color:#FF3366;}"
+        & ".neu{background:#F1F2F7;color:#6B7280;}"
+        & ".kpis{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;}"
+        & ".kpi{flex:1 1 205px;background:#FFFFFF;border:1px solid #E6E8F0;border-radius:8px;padding:11px 13px;box-shadow:0 1px 2px rgba(9,14,41,.06);border-top:3px solid #1226AA;}"
+        & ".kpi.k2{border-top-color:#FF3366;}.kpi.k3{border-top-color:#090E29;}"
+        & ".kpi.k4{border-top-color:#4D63D6;}.kpi.k5{border-top-color:#E8A317;}"
+        & ".kl{font-size:12.5px;text-transform:uppercase;letter-spacing:.6px;color:#6B7280;margin-bottom:5px;font-weight:600;}"
+        & ".kv{font-size:34px;font-weight:700;color:#1226AA;line-height:1.05;}"
+        & ".kv.r{color:#FF3366;}.kv.u{color:#090E29;}.kv.a{color:#E8A317;}"
+        & ".kv.sm{font-size:24px;padding-top:5px;}"
+        & ".ks{font-size:12.5px;color:#6B7280;margin-top:5px;}"
+        & ".grid{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;}"
+        & ".card{flex:1 1 355px;background:#FFFFFF;border:1px solid #E6E8F0;border-radius:8px;padding:11px 13px;box-shadow:0 1px 2px rgba(9,14,41,.06);}"
+        & ".card.w2{flex:2 1 760px;}"
+        & ".card.full{flex:1 1 100%;margin-bottom:12px;}"
+        & ".card h2{margin:0;font-size:16px;font-weight:700;color:#090E29;}"
+        & ".card .cs{margin:2px 0 9px 0;font-size:12.5px;color:#6B7280;}"
+        & ".rk{width:100%;border-collapse:collapse;}"
+        & ".rk td{padding:4px 3px;font-size:14px;border-bottom:1px solid #F2F3F8;vertical-align:middle;}"
+        & ".rk td.p{width:18px;color:#6B7280;font-weight:700;}"
+        & ".rk td.l{width:32%;font-weight:600;color:#090E29;}"
+        & ".rk td.q{width:74px;text-align:right;font-weight:700;color:#1226AA;}"
+        & ".rk td.c{width:56px;text-align:right;color:#6B7280;}"
+        & ".bg{background:#EDEFF7;border-radius:3px;height:11px;width:100%;}"
+        & ".br{background:#1226AA;height:11px;border-radius:3px;}"
+        & ".br2{background:#FF3366;height:11px;border-radius:3px;}"
+        & ".tb{width:100%;border-collapse:collapse;}"
+        & ".tb th{background:#1226AA;color:#FFFFFF;font-size:12.5px;text-transform:uppercase;letter-spacing:.5px;padding:6px 7px;text-align:left;font-weight:600;}"
+        & ".tb th.r,.tb td.r{text-align:right;}"
+        & ".tb td{padding:5px 7px;font-size:14px;border-bottom:1px solid #F2F3F8;color:#090E29;}"
+        & ".tb tr:nth-child(even) td{background:#FBFBFD;}"
+        & ".tb td.b{font-weight:700;}"
+        & ".tg{border-radius:9px;padding:2px 7px;font-size:11px;font-weight:700;text-transform:uppercase;}"
+        & ".tg-ok{background:#E4F6EF;color:#17A673;}"
+        & ".tg-at{background:#FFF6E3;color:#E8A317;}"
+        & ".tg-cr{background:#FFE8EE;color:#FF3366;}"
+        & ".ins{display:flex;gap:10px;flex-wrap:wrap;}"
+        & ".ic{flex:1 1 355px;background:#F3F5FC;border-left:3px solid #1226AA;border-radius:6px;padding:9px 11px;}"
+        & ".ic h3{margin:0 0 4px 0;font-size:14px;font-weight:700;color:#1226AA;}"
+        & ".ic p{margin:0;font-size:14px;line-height:1.45;color:#090E29;}"
+        & ".ft{margin-top:11px;font-size:11px;color:#6B7280;border-top:1px solid #E6E8F0;padding-top:7px;display:flex;justify-content:space-between;}"
+        & ".vz{font-size:14px;color:#6B7280;padding:22px;text-align:center;}"
+        & ".bn{background:#1226AA;border-radius:8px;padding:14px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;}"
+        & ".bn h1{margin:0;color:#FFFFFF;font-size:22.5px;font-weight:700;}"
+        & ".bn p{margin:3px 0 0 0;color:#C9CEF0;font-size:14px;}"
+        & ".bn .tag{background:#FFFFFF;color:#1226AA;border-radius:12px;padding:4px 12px;font-size:14px;font-weight:700;}"
+        & ".fl{background:#FFFFFF;border:1px solid #E6E8F0;border-radius:8px;padding:10px 12px;margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;}"
+        & ".fi{flex:1 1 190px;}"
+        & ".fi span{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6B7280;margin-bottom:4px;font-weight:600;}"
+        & ".fi div{border:1px solid #E6E8F0;border-radius:5px;padding:6px 9px;font-size:14px;color:#090E29;background:#F7F8FC;}"
+        & ".sc{display:inline-block;width:64px;height:8px;background:#EDEFF7;border-radius:3px;vertical-align:middle;margin-left:6px;}"
+        & ".sc i{display:block;height:8px;border-radius:3px;background:#FF3366;}"
+        & "</style>"
+
+
+/* =========================================================================
+   BLOCO 3 — RELATORIO A: [BS2 Dash Consolidado HTML]
+   Visao executiva consolidada — KPIs, linha mensal, rankings, insights
+   ========================================================================= */
+
+BS2 Dash Consolidado HTML =
+VAR Q = UNICHAR ( 34 )
+VAR _Total = [Atendimentos Realizados]
+
+/* --- KPIs --- */
+VAR _TotalFmt   = FORMAT ( _Total, "#,##0" )
+VAR _TMA        = [TMA Formatado]
+VAR _Periodo    = [Periodo Analisado]
+VAR _Atendentes = FORMAT ( [Atendentes Ativos], "#,##0" )
+VAR _MediaAt    = FORMAT ( [Media Atendimentos por Atendente], "#,##0.0" )
+VAR _CanalTop   = [Canal Mais Atendido]
+VAR _CanalPct   = FORMAT ( [% Canal Mais Atendido], "0.0%" )
+VAR _CanalQtd   = FORMAT ( [Qtd Canal Mais Atendido], "#,##0" )
+VAR _DepTop     = [Departamento Mais Acionado]
+VAR _DepPct     = FORMAT ( [% Departamento Mais Acionado], "0.0%" )
+VAR _DepQtd     = FORMAT ( [Qtd Departamento Mais Acionado], "#,##0" )
+
+VAR _VarVol   = [Var % Atendimentos MoM]
+VAR _PillVol =
+    IF (
+        ISBLANK ( _VarVol ),
+        "<span class=" & Q & "pill neu" & Q & ">&#9679; s/ base</span> comparativa",
+        "<span class=" & Q & "pill " & IF ( _VarVol >= 0, "pos", "neg" ) & Q & ">"
+            & IF ( _VarVol >= 0, "&#9650; ", "&#9660; " ) & FORMAT ( ABS ( _VarVol ), "0.0%" )
+            & "</span> vs mes anterior"
+    )
+
+/* TMA: queda e resultado positivo -> classe invertida */
+VAR _VarTMA = [Var % TMA MoM]
+VAR _PillTMA =
+    IF (
+        ISBLANK ( _VarTMA ),
+        "<span class=" & Q & "pill neu" & Q & ">&#9679; s/ base</span> comparativa",
+        "<span class=" & Q & "pill " & IF ( _VarTMA <= 0, "pos", "neg" ) & Q & ">"
+            & IF ( _VarTMA <= 0, "&#9660; ", "&#9650; " ) & FORMAT ( ABS ( _VarTMA ), "0.0%" )
+            & "</span> vs mes anterior"
+    )
+
+/* --- Ranking generico: canal / departamento / fila --- */
+VAR _TabCanal = ADDCOLUMNS ( VALUES ( fato_genesys[media_type] ), "@Q", [Atendimentos Realizados] )
+VAR _TopCanal = TOPN ( 5, _TabCanal, [@Q], DESC, fato_genesys[media_type], ASC )
+VAR _MaxCanal = MAXX ( _TopCanal, [@Q] )
+VAR _LinCanal =
+    CONCATENATEX (
+        ADDCOLUMNS ( _TopCanal, "@P", RANKX ( _TopCanal, [@Q],, DESC, DENSE ) ),
+        VAR _Nome = IF ( ISBLANK ( fato_genesys[media_type] ), "(nao informado)", fato_genesys[media_type] )
+        VAR _W = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _MaxCanal ) * 100, "0.0" ), ",", "." )
+        VAR _S = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _Total ) * 100, "0.0" ), ",", "." )
+        RETURN
+            "<tr><td class=" & Q & "p" & Q & ">" & FORMAT ( [@P], "0" ) & "</td>"
+                & "<td class=" & Q & "l" & Q & ">" & _Nome & "</td>"
+                & "<td><div class=" & Q & "bg" & Q & "><div class=" & Q & "br" & Q
+                & " style=" & Q & "width:" & _W & "%" & Q & "></div></div></td>"
+                & "<td class=" & Q & "q" & Q & ">" & FORMAT ( [@Q], "#,##0" ) & "</td>"
+                & "<td class=" & Q & "c" & Q & ">" & _S & "%</td></tr>",
+        "", [@Q], DESC
+    )
+
+VAR _TabDep = ADDCOLUMNS ( VALUES ( fato_genesys[department] ), "@Q", [Atendimentos Realizados] )
+VAR _TopDep = TOPN ( 5, _TabDep, [@Q], DESC, fato_genesys[department], ASC )
+VAR _MaxDep = MAXX ( _TopDep, [@Q] )
+VAR _LinDep =
+    CONCATENATEX (
+        ADDCOLUMNS ( _TopDep, "@P", RANKX ( _TopDep, [@Q],, DESC, DENSE ) ),
+        VAR _Nome = IF ( ISBLANK ( fato_genesys[department] ), "(nao informado)", fato_genesys[department] )
+        VAR _W = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _MaxDep ) * 100, "0.0" ), ",", "." )
+        VAR _S = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _Total ) * 100, "0.0" ), ",", "." )
+        RETURN
+            "<tr><td class=" & Q & "p" & Q & ">" & FORMAT ( [@P], "0" ) & "</td>"
+                & "<td class=" & Q & "l" & Q & ">" & _Nome & "</td>"
+                & "<td><div class=" & Q & "bg" & Q & "><div class=" & Q & "br" & Q
+                & " style=" & Q & "width:" & _W & "%" & Q & "></div></div></td>"
+                & "<td class=" & Q & "q" & Q & ">" & FORMAT ( [@Q], "#,##0" ) & "</td>"
+                & "<td class=" & Q & "c" & Q & ">" & _S & "%</td></tr>",
+        "", [@Q], DESC
+    )
+
+VAR _TabFila = ADDCOLUMNS ( VALUES ( fato_genesys[name_queue] ), "@Q", [Atendimentos Realizados] )
+VAR _TopFila = TOPN ( 5, _TabFila, [@Q], DESC, fato_genesys[name_queue], ASC )
+VAR _MaxFila = MAXX ( _TopFila, [@Q] )
+VAR _LinFila =
+    CONCATENATEX (
+        ADDCOLUMNS ( _TopFila, "@P", RANKX ( _TopFila, [@Q],, DESC, DENSE ) ),
+        VAR _Nome = IF ( ISBLANK ( fato_genesys[name_queue] ), "(nao informado)", fato_genesys[name_queue] )
+        VAR _W = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _MaxFila ) * 100, "0.0" ), ",", "." )
+        VAR _S = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _Total ) * 100, "0.0" ), ",", "." )
+        RETURN
+            "<tr><td class=" & Q & "p" & Q & ">" & FORMAT ( [@P], "0" ) & "</td>"
+                & "<td class=" & Q & "l" & Q & ">" & _Nome & "</td>"
+                & "<td><div class=" & Q & "bg" & Q & "><div class=" & Q & "br2" & Q
+                & " style=" & Q & "width:" & _W & "%" & Q & "></div></div></td>"
+                & "<td class=" & Q & "q" & Q & ">" & FORMAT ( [@Q], "#,##0" ) & "</td>"
+                & "<td class=" & Q & "c" & Q & ">" & _S & "%</td></tr>",
+        "", [@Q], DESC
+    )
+
+/* --- Serie mensal: volume (linha) + TMA (colunas) --- */
+VAR _Meses = SUMMARIZE ( ADDCOLUMNS ( SUMMARIZE ( ALLSELECTED ( fato_genesys ), fato_genesys[Data] ),
+                "@M", EOMONTH ( fato_genesys[Data], 0 ) ), [@M] )
+VAR _MesesCalc =
+    ADDCOLUMNS (
+        _Meses,
+        "@Vol",
+            VAR _Mes = [@M]
+            RETURN
+                CALCULATE ( [Atendimentos Realizados], ALLSELECTED ( fato_genesys ),
+                    FILTER ( ALL ( fato_genesys[Data] ), EOMONTH ( fato_genesys[Data], 0 ) = _Mes ) ),
+        "@Tma",
+            VAR _Mes2 = [@M]
+            RETURN
+                CALCULATE ( [TMA Segundos], ALLSELECTED ( fato_genesys ),
+                    FILTER ( ALL ( fato_genesys[Data] ), EOMONTH ( fato_genesys[Data], 0 ) = _Mes2 ) )
+    )
+VAR _Top12 = TOPN ( 12, _MesesCalc, [@M], DESC )
+VAR _Serie = ADDCOLUMNS ( _Top12, "@P", RANKX ( _Top12, [@M],, ASC, DENSE ) )
+VAR _N = COUNTROWS ( _Serie )
+VAR _MaxVol = MAXX ( _Serie, [@Vol] )
+VAR _MaxTma = MAXX ( _Serie, [@Tma] )
+VAR _X0 = 54
+VAR _X1 = 872
+VAR _YT = 30
+VAR _YB = 152
+VAR _Passo = IF ( _N > 1, DIVIDE ( _X1 - _X0, _N - 1 ), 0 )
+
+VAR _Pontos =
+    CONCATENATEX (
+        _Serie,
+        VAR _X = _X0 + ( [@P] - 1 ) * _Passo
+        VAR _Y = _YB - DIVIDE ( [@Vol], _MaxVol ) * ( _YB - _YT )
+        RETURN
+            SUBSTITUTE ( FORMAT ( _X, "0.0" ), ",", "." ) & ","
+                & SUBSTITUTE ( FORMAT ( _Y, "0.0" ), ",", "." ),
+        " ", [@M], ASC
+    )
+
+VAR _Marcas =
+    CONCATENATEX (
+        _Serie,
+        VAR _X = _X0 + ( [@P] - 1 ) * _Passo
+        VAR _Y = _YB - DIVIDE ( [@Vol], _MaxVol ) * ( _YB - _YT )
+        VAR _Xs = SUBSTITUTE ( FORMAT ( _X, "0.0" ), ",", "." )
+        VAR _Ys = SUBSTITUTE ( FORMAT ( _Y, "0.0" ), ",", "." )
+        VAR _Yt = SUBSTITUTE ( FORMAT ( _Y - 12, "0.0" ), ",", "." )
+        RETURN
+            "<circle cx=" & Q & _Xs & Q & " cy=" & Q & _Ys & Q & " r=" & Q & "3.2" & Q
+                & " fill=" & Q & "#1226AA" & Q & " stroke=" & Q & "#FFFFFF" & Q
+                & " stroke-width=" & Q & "1.4" & Q & "></circle>"
+                & "<text x=" & Q & _Xs & Q & " y=" & Q & _Yt & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#090E29" & Q & " text-anchor=" & Q & "middle" & Q
+                & " font-weight=" & Q & "700" & Q & ">" & FORMAT ( [@Vol], "#,##0" ) & "</text>"
+                & "<text x=" & Q & _Xs & Q & " y=" & Q & "186" & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#6B7280" & Q & " text-anchor=" & Q & "middle" & Q & ">"
+                & FORMAT ( [@M], "MMM/YY" ) & "</text>",
+        "", [@M], ASC
+    )
+
+VAR _GradeVol =
+    CONCATENATEX (
+        GENERATESERIES ( 0, 4, 1 ),
+        VAR _K = [Value]
+        VAR _Yg = SUBSTITUTE ( FORMAT ( _YB - ( _K / 4 ) * ( _YB - _YT ), "0.0" ), ",", "." )
+        RETURN
+            "<line x1=" & Q & "54" & Q & " y1=" & Q & _Yg & Q & " x2=" & Q & "872" & Q
+                & " y2=" & Q & _Yg & Q & " stroke=" & Q & "#EDEFF7" & Q & "></line>"
+                & "<text x=" & Q & "46" & Q & " y=" & Q
+                & SUBSTITUTE ( FORMAT ( _YB - ( _K / 4 ) * ( _YB - _YT ) + 4, "0.0" ), ",", "." ) & Q
+                & " font-size=" & Q & "11.5" & Q & " fill=" & Q & "#6B7280" & Q
+                & " text-anchor=" & Q & "end" & Q & ">"
+                & FORMAT ( _MaxVol * _K / 4, "#,##0" ) & "</text>",
+        ""
+    )
+
+VAR _GrafVol =
+    IF (
+        ISBLANK ( _N ) || _N = 0 || ISBLANK ( _MaxVol ) || _MaxVol = 0,
+        "<div class=" & Q & "vz" & Q & ">Sem chamados no periodo selecionado.</div>",
+        "<svg viewBox=" & Q & "0 0 900 214" & Q & " width=" & Q & "100%" & Q & " height=" & Q & "214" & Q
+            & " preserveAspectRatio=" & Q & "xMidYMid meet" & Q & ">" & _GradeVol
+            & "<polyline fill=" & Q & "none" & Q & " stroke=" & Q & "#1226AA" & Q
+            & " stroke-width=" & Q & "2.4" & Q & " stroke-linejoin=" & Q & "round" & Q
+            & " stroke-linecap=" & Q & "round" & Q & " points=" & Q & _Pontos & Q & "></polyline>"
+            & _Marcas & "</svg>"
+    )
+
+/* Colunas de TMA por mes */
+VAR _Slot = IF ( _N > 0, DIVIDE ( 884 - 52, _N ), 0 )
+VAR _BW   = _Slot * 0.58
+VAR _Colunas =
+    CONCATENATEX (
+        _Serie,
+        VAR _H  = DIVIDE ( [@Tma], _MaxTma ) * 120
+        VAR _Xb = 52 + ( [@P] - 1 ) * _Slot + ( _Slot - _BW ) / 2
+        VAR _Yb2 = 150 - _H
+        VAR _Xs = SUBSTITUTE ( FORMAT ( _Xb, "0.0" ), ",", "." )
+        VAR _Ys = SUBSTITUTE ( FORMAT ( _Yb2, "0.0" ), ",", "." )
+        VAR _Ws = SUBSTITUTE ( FORMAT ( _BW, "0.0" ), ",", "." )
+        VAR _Hs = SUBSTITUTE ( FORMAT ( _H, "0.0" ), ",", "." )
+        VAR _Xc = SUBSTITUTE ( FORMAT ( _Xb + _BW / 2, "0.0" ), ",", "." )
+        VAR _Yl = SUBSTITUTE ( FORMAT ( _Yb2 - 7, "0.0" ), ",", "." )
+        RETURN
+            "<rect x=" & Q & _Xs & Q & " y=" & Q & _Ys & Q & " width=" & Q & _Ws & Q
+                & " height=" & Q & _Hs & Q & " rx=" & Q & "2" & Q & " fill=" & Q & "#1226AA" & Q & "></rect>"
+                & "<text x=" & Q & _Xc & Q & " y=" & Q & _Yl & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#090E29" & Q & " text-anchor=" & Q & "middle" & Q
+                & " font-weight=" & Q & "700" & Q & ">" & FORMAT ( [@Tma], "#,##0" ) & "</text>"
+                & "<text x=" & Q & _Xc & Q & " y=" & Q & "173" & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#6B7280" & Q & " text-anchor=" & Q & "middle" & Q & ">"
+                & FORMAT ( [@M], "MMM/YY" ) & "</text>",
+        "", [@M], ASC
+    )
+
+VAR _GrafTma =
+    IF (
+        ISBLANK ( _MaxTma ) || _MaxTma = 0,
+        "<div class=" & Q & "vz" & Q & ">Sem TMA calculavel no periodo.</div>",
+        "<svg viewBox=" & Q & "0 0 900 200" & Q & " width=" & Q & "100%" & Q & " height=" & Q & "200" & Q
+            & " preserveAspectRatio=" & Q & "xMidYMid meet" & Q & ">"
+            & "<line x1=" & Q & "52" & Q & " y1=" & Q & "150" & Q & " x2=" & Q & "884" & Q
+            & " y2=" & Q & "150" & Q & " stroke=" & Q & "#D9DCEA" & Q & "></line>"
+            & _Colunas & "</svg>"
+    )
+
+/* --- Insights dinamicos --- */
+VAR _Ins1 =
+    "<div class=" & Q & "ic" & Q & "><h3>&#128161; Mix de Canais</h3><p>"
+        & _CanalTop & " concentra " & _CanalPct & " dos atendimentos (" & _CanalQtd
+        & " conversas) &#8212; migrar demanda repetitiva para canais assincronos tende a reduzir o TMA consolidado de "
+        & _TMA & ".</p></div>"
+VAR _Ins2 =
+    "<div class=" & Q & "ic" & Q & "><h3>&#128161; Concentracao por Area</h3><p>"
+        & _DepTop & " responde por " & _DepPct & " do volume (" & _DepQtd
+        & " conversas) &#8212; avaliar automacao dos assuntos recorrentes desse departamento.</p></div>"
+VAR _Ins3 =
+    "<div class=" & Q & "ic" & Q & "><h3>&#128161; Produtividade</h3><p>"
+        & _TotalFmt & " atendimentos distribuidos entre " & _Atendentes & " atendentes ativos ("
+        & _MediaAt & " por atendente) &#8212; monitorar capacidade frente a variacao do volume mensal.</p></div>"
+
+VAR _HTML =
+    [BS2 CSS]
+        & "<div class=" & Q & "bs2" & Q & ">"
+        & "<div class=" & Q & "hd" & Q & "><div>"
+        & "<h1>Atendimento <span>| Consolidado</span></h1>"
+        & "<p class=" & Q & "sub" & Q & ">fato_genesys &#183; Genesys via Google BigQuery &#183; "
+        & _Periodo & "</p></div>"
+        & "<div class=" & Q & "lg" & Q & ">"
+        & "<span><i style=" & Q & "background:#1226AA" & Q & "></i>Volume</span>"
+        & "<span><i style=" & Q & "background:#FF3366" & Q & "></i>Filas</span>"
+        & "<span>% vs mes anterior:</span>"
+        & "<span class=" & Q & "pill pos" & Q & ">&#9650; positivo</span>"
+        & "<span class=" & Q & "pill neg" & Q & ">&#9660; negativo</span></div></div>"
+
+        & "<div class=" & Q & "kpis" & Q & ">"
+        & "<div class=" & Q & "kpi" & Q & "><div class=" & Q & "kl" & Q & ">Atendimentos Realizados</div>"
+        & "<div class=" & Q & "kv" & Q & ">" & _TotalFmt & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">" & _PillVol & "</div></div>"
+        & "<div class=" & Q & "kpi k2" & Q & "><div class=" & Q & "kl" & Q & ">TMA &#8212; Tempo Medio</div>"
+        & "<div class=" & Q & "kv r" & Q & ">" & _TMA & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">" & _PillTMA & "</div></div>"
+        & "<div class=" & Q & "kpi k3" & Q & "><div class=" & Q & "kl" & Q & ">Canal Mais Atendido</div>"
+        & "<div class=" & Q & "kv u" & Q & ">" & _CanalTop & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">" & _CanalPct & " do volume total</div></div>"
+        & "<div class=" & Q & "kpi k4" & Q & "><div class=" & Q & "kl" & Q & ">Departamento Top</div>"
+        & "<div class=" & Q & "kv sm" & Q & ">" & _DepTop & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">" & _DepPct & " do volume total</div></div>"
+        & "<div class=" & Q & "kpi k5" & Q & "><div class=" & Q & "kl" & Q & ">Atendentes Ativos</div>"
+        & "<div class=" & Q & "kv u" & Q & ">" & _Atendentes & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">Media de " & _MediaAt & " atend./atendente</div></div>"
+        & "</div>"
+
+        & "<div class=" & Q & "grid" & Q & ">"
+        & "<div class=" & Q & "card w2" & Q & "><h2>Chamados Abertos por Mes</h2>"
+        & "<p class=" & Q & "cs" & Q & ">Qtd &#183; conversas distintas &#183; ultimos 12 meses</p>"
+        & _GrafVol & "</div>"
+        & "<div class=" & Q & "card" & Q & "><h2>Volume por Canal</h2>"
+        & "<p class=" & Q & "cs" & Q & ">media_type &#183; Top 5</p>"
+        & "<table class=" & Q & "rk" & Q & ">" & _LinCanal & "</table></div></div>"
+
+        & "<div class=" & Q & "grid" & Q & ">"
+        & "<div class=" & Q & "card" & Q & "><h2>Volume por Departamento</h2>"
+        & "<p class=" & Q & "cs" & Q & ">department &#183; Top 5</p>"
+        & "<table class=" & Q & "rk" & Q & ">" & _LinDep & "</table></div>"
+        & "<div class=" & Q & "card" & Q & "><h2>Volume por Fila</h2>"
+        & "<p class=" & Q & "cs" & Q & ">name_queue &#183; Top 5</p>"
+        & "<table class=" & Q & "rk" & Q & ">" & _LinFila & "</table></div>"
+        & "<div class=" & Q & "card" & Q & "><h2>TMA por Mes</h2>"
+        & "<p class=" & Q & "cs" & Q & ">Segundos &#183; ultimos 12 meses</p>" & _GrafTma & "</div></div>"
+
+        & "<div class=" & Q & "ins" & Q & ">" & _Ins1 & _Ins2 & _Ins3 & "</div>"
+
+        & "<div class=" & Q & "ft" & Q & "><span>Banco BS2 &#183; fato_genesys (Genesys / Google BigQuery)</span>"
+        & "<span>Granularidade: 1 linha = 1 segmento de conversa &#183; atualizado em "
+        & FORMAT ( NOW (), "DD/MM/YYYY HH:MM" ) & "</span></div></div>"
+
+RETURN
+    IF (
+        ISBLANK ( _Total ) || _Total = 0,
+        [BS2 CSS] & "<div class=" & Q & "bs2" & Q & "><div class=" & Q & "card" & Q & "><div class="
+            & Q & "vz" & Q & ">Sem atendimentos para os filtros selecionados.</div></div></div>",
+        _HTML
+    )
+
+
+/* =========================================================================
+   BLOCO 4 — RELATORIO B: [BS2 Dash Sinais Vitais HTML]
+   Painel operacional — semaforo de atendentes + tabela de monitoramento
+   ========================================================================= */
+
+BS2 Dash Sinais Vitais HTML =
+VAR Q = UNICHAR ( 34 )
+VAR _Total = [Atendimentos Realizados]
+VAR _TotalFmt = FORMAT ( _Total, "#,##0" )
+VAR _TMA = [TMA Formatado]
+VAR _Periodo = [Periodo Analisado]
+VAR _Atendentes = [Atendentes Ativos]
+VAR _AtendFmt = FORMAT ( _Atendentes, "#,##0" )
+VAR _MediaAt = FORMAT ( [Media Atendimentos por Atendente], "#,##0.0" )
+VAR _Alerta = FORMAT ( [Atendentes em Alerta], "#,##0" )
+VAR _Critico = FORMAT ( [Atendentes Criticos], "#,##0" )
+VAR _Ref = [TMA Portfolio Segundos]
+
+/* --- Rankings --- */
+VAR _TabCanal = ADDCOLUMNS ( VALUES ( fato_genesys[media_type] ), "@Q", [Atendimentos Realizados] )
+VAR _TopCanal = TOPN ( 5, _TabCanal, [@Q], DESC, fato_genesys[media_type], ASC )
+VAR _MaxCanal = MAXX ( _TopCanal, [@Q] )
+VAR _LinCanal =
+    CONCATENATEX (
+        ADDCOLUMNS ( _TopCanal, "@P", RANKX ( _TopCanal, [@Q],, DESC, DENSE ) ),
+        VAR _Nome = IF ( ISBLANK ( fato_genesys[media_type] ), "(nao informado)", fato_genesys[media_type] )
+        VAR _W = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _MaxCanal ) * 100, "0.0" ), ",", "." )
+        VAR _S = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _Total ) * 100, "0.0" ), ",", "." )
+        RETURN
+            "<tr><td class=" & Q & "p" & Q & ">" & FORMAT ( [@P], "0" ) & "</td>"
+                & "<td class=" & Q & "l" & Q & ">" & _Nome & "</td>"
+                & "<td><div class=" & Q & "bg" & Q & "><div class=" & Q & "br" & Q
+                & " style=" & Q & "width:" & _W & "%" & Q & "></div></div></td>"
+                & "<td class=" & Q & "q" & Q & ">" & FORMAT ( [@Q], "#,##0" ) & "</td>"
+                & "<td class=" & Q & "c" & Q & ">" & _S & "%</td></tr>",
+        "", [@Q], DESC
+    )
+
+VAR _TabDep = ADDCOLUMNS ( VALUES ( fato_genesys[department] ), "@Q", [Atendimentos Realizados] )
+VAR _TopDep = TOPN ( 5, _TabDep, [@Q], DESC, fato_genesys[department], ASC )
+VAR _MaxDep = MAXX ( _TopDep, [@Q] )
+VAR _LinDep =
+    CONCATENATEX (
+        ADDCOLUMNS ( _TopDep, "@P", RANKX ( _TopDep, [@Q],, DESC, DENSE ) ),
+        VAR _Nome = IF ( ISBLANK ( fato_genesys[department] ), "(nao informado)", fato_genesys[department] )
+        VAR _W = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _MaxDep ) * 100, "0.0" ), ",", "." )
+        VAR _S = SUBSTITUTE ( FORMAT ( DIVIDE ( [@Q], _Total ) * 100, "0.0" ), ",", "." )
+        RETURN
+            "<tr><td class=" & Q & "p" & Q & ">" & FORMAT ( [@P], "0" ) & "</td>"
+                & "<td class=" & Q & "l" & Q & ">" & _Nome & "</td>"
+                & "<td><div class=" & Q & "bg" & Q & "><div class=" & Q & "br2" & Q
+                & " style=" & Q & "width:" & _W & "%" & Q & "></div></div></td>"
+                & "<td class=" & Q & "q" & Q & ">" & FORMAT ( [@Q], "#,##0" ) & "</td>"
+                & "<td class=" & Q & "c" & Q & ">" & _S & "%</td></tr>",
+        "", [@Q], DESC
+    )
+
+/* --- Serie mensal (linha) --- */
+VAR _Meses = SUMMARIZE ( ADDCOLUMNS ( SUMMARIZE ( ALLSELECTED ( fato_genesys ), fato_genesys[Data] ),
+                "@M", EOMONTH ( fato_genesys[Data], 0 ) ), [@M] )
+VAR _MesesQtd =
+    ADDCOLUMNS (
+        _Meses,
+        "@Vol",
+            VAR _Mes = [@M]
+            RETURN
+                CALCULATE ( [Atendimentos Realizados], ALLSELECTED ( fato_genesys ),
+                    FILTER ( ALL ( fato_genesys[Data] ), EOMONTH ( fato_genesys[Data], 0 ) = _Mes ) )
+    )
+VAR _Top12 = TOPN ( 12, _MesesQtd, [@M], DESC )
+VAR _Serie = ADDCOLUMNS ( _Top12, "@P", RANKX ( _Top12, [@M],, ASC, DENSE ) )
+VAR _N = COUNTROWS ( _Serie )
+VAR _MaxVol = MAXX ( _Serie, [@Vol] )
+VAR _Passo = IF ( _N > 1, DIVIDE ( 872 - 54, _N - 1 ), 0 )
+
+VAR _Pontos =
+    CONCATENATEX (
+        _Serie,
+        VAR _X = 54 + ( [@P] - 1 ) * _Passo
+        VAR _Y = 152 - DIVIDE ( [@Vol], _MaxVol ) * 122
+        RETURN
+            SUBSTITUTE ( FORMAT ( _X, "0.0" ), ",", "." ) & ","
+                & SUBSTITUTE ( FORMAT ( _Y, "0.0" ), ",", "." ),
+        " ", [@M], ASC
+    )
+
+VAR _Marcas =
+    CONCATENATEX (
+        _Serie,
+        VAR _X = 54 + ( [@P] - 1 ) * _Passo
+        VAR _Y = 152 - DIVIDE ( [@Vol], _MaxVol ) * 122
+        VAR _Xs = SUBSTITUTE ( FORMAT ( _X, "0.0" ), ",", "." )
+        VAR _Ys = SUBSTITUTE ( FORMAT ( _Y, "0.0" ), ",", "." )
+        VAR _Yt = SUBSTITUTE ( FORMAT ( _Y - 12, "0.0" ), ",", "." )
+        RETURN
+            "<circle cx=" & Q & _Xs & Q & " cy=" & Q & _Ys & Q & " r=" & Q & "3.2" & Q
+                & " fill=" & Q & "#1226AA" & Q & " stroke=" & Q & "#FFFFFF" & Q
+                & " stroke-width=" & Q & "1.4" & Q & "></circle>"
+                & "<text x=" & Q & _Xs & Q & " y=" & Q & _Yt & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#090E29" & Q & " text-anchor=" & Q & "middle" & Q
+                & " font-weight=" & Q & "700" & Q & ">" & FORMAT ( [@Vol], "#,##0" ) & "</text>"
+                & "<text x=" & Q & _Xs & Q & " y=" & Q & "186" & Q & " font-size=" & Q & "12.5" & Q
+                & " fill=" & Q & "#6B7280" & Q & " text-anchor=" & Q & "middle" & Q & ">"
+                & FORMAT ( [@M], "MMM/YY" ) & "</text>",
+        "", [@M], ASC
+    )
+
+VAR _Grade =
+    CONCATENATEX (
+        GENERATESERIES ( 0, 4, 1 ),
+        VAR _K = [Value]
+        VAR _Yg = SUBSTITUTE ( FORMAT ( 152 - ( _K / 4 ) * 122, "0.0" ), ",", "." )
+        RETURN
+            "<line x1=" & Q & "54" & Q & " y1=" & Q & _Yg & Q & " x2=" & Q & "872" & Q
+                & " y2=" & Q & _Yg & Q & " stroke=" & Q & "#EDEFF7" & Q & "></line>"
+                & "<text x=" & Q & "46" & Q & " y=" & Q
+                & SUBSTITUTE ( FORMAT ( 152 - ( _K / 4 ) * 122 + 4, "0.0" ), ",", "." ) & Q
+                & " font-size=" & Q & "11.5" & Q & " fill=" & Q & "#6B7280" & Q
+                & " text-anchor=" & Q & "end" & Q & ">" & FORMAT ( _MaxVol * _K / 4, "#,##0" ) & "</text>",
+        ""
+    )
+
+VAR _Grafico =
+    IF (
+        ISBLANK ( _N ) || _N = 0 || ISBLANK ( _MaxVol ) || _MaxVol = 0,
+        "<div class=" & Q & "vz" & Q & ">Sem chamados no periodo selecionado.</div>",
+        "<svg viewBox=" & Q & "0 0 900 214" & Q & " width=" & Q & "100%" & Q & " height=" & Q & "214" & Q
+            & " preserveAspectRatio=" & Q & "xMidYMid meet" & Q & ">" & _Grade
+            & "<polyline fill=" & Q & "none" & Q & " stroke=" & Q & "#1226AA" & Q
+            & " stroke-width=" & Q & "2.4" & Q & " stroke-linejoin=" & Q & "round" & Q
+            & " stroke-linecap=" & Q & "round" & Q & " points=" & Q & _Pontos & Q & "></polyline>"
+            & _Marcas & "</svg>"
+    )
+
+/* --- Tabela de atendentes em monitoramento (Top 15 por volume) --- */
+VAR _TabAt =
+    ADDCOLUMNS (
+        CALCULATETABLE (
+            VALUES ( fato_genesys[participant_name] ),
+            KEEPFILTERS ( NOT ISBLANK ( fato_genesys[participant_name] ) )
+        ),
+        "@Qtd", [Atendimentos Realizados],
+        "@Tma", [TMA Segundos],
+        "@Dep", CALCULATE ( CONCATENATEX ( VALUES ( fato_genesys[department] ), fato_genesys[department], " / " ) ),
+        "@Fila", CALCULATE ( CONCATENATEX ( TOPN ( 1, VALUES ( fato_genesys[name_queue] ),
+                    fato_genesys[name_queue], ASC ), fato_genesys[name_queue] ) )
+    )
+VAR _TopAt = TOPN ( 15, _TabAt, [@Qtd], DESC, fato_genesys[participant_name], ASC )
+VAR _LinhasAt =
+    CONCATENATEX (
+        _TopAt,
+        VAR _Nome = fato_genesys[participant_name]
+        VAR _Qtd = [@Qtd]
+        VAR _Tma = [@Tma]
+        VAR _H = INT ( DIVIDE ( _Tma, 3600 ) )
+        VAR _M = INT ( DIVIDE ( MOD ( _Tma, 3600 ), 60 ) )
+        VAR _S = INT ( MOD ( _Tma, 60 ) )
+        VAR _TmaFmt =
+            IF ( ISBLANK ( _Tma ), "--:--:--",
+                FORMAT ( _H, "00" ) & ":" & FORMAT ( _M, "00" ) & ":" & FORMAT ( _S, "00" ) )
+        /* Score 0-100: 100 = TMA zero; 0 = TMA >= 2x a media do portfolio (PREMISSA) */
+        VAR _ScoreRaw = 100 - DIVIDE ( _Tma, _Ref * 2 ) * 100
+        VAR _Score = MAX ( 0, MIN ( 100, ROUND ( _ScoreRaw, 0 ) ) )
+        VAR _ScoreW = SUBSTITUTE ( FORMAT ( _Score, "0.0" ), ",", "." )
+        VAR _Cls =
+            IF ( ISBLANK ( _Tma ) || _Tma < _Ref, "tg-ok",
+                IF ( _Tma < _Ref * 1.5, "tg-at", "tg-cr" ) )
+        VAR _Txt =
+            IF ( ISBLANK ( _Tma ) || _Tma < _Ref, "NORMAL",
+                IF ( _Tma < _Ref * 1.5, "MONITORAR", "CRITICO" ) )
+        RETURN
+            "<tr><td class=" & Q & "b" & Q & ">" & _Nome & "</td>"
+                & "<td>" & IF ( ISBLANK ( [@Dep] ), "(nao informado)", [@Dep] ) & "</td>"
+                & "<td>" & IF ( ISBLANK ( [@Fila] ), "(nao informado)", [@Fila] ) & "</td>"
+                & "<td class=" & Q & "r b" & Q & ">" & FORMAT ( _Qtd, "#,##0" ) & "</td>"
+                & "<td class=" & Q & "r" & Q & ">" & _TmaFmt & "</td>"
+                & "<td class=" & Q & "r" & Q & ">" & FORMAT ( _Score, "0" )
+                & "<span class=" & Q & "sc" & Q & "><i style=" & Q & "width:" & _ScoreW & "%" & Q
+                & "></i></span></td>"
+                & "<td><span class=" & Q & "tg " & _Cls & Q & ">" & _Txt & "</span></td></tr>",
+        "", [@Qtd], DESC
+    )
+
+VAR _RefFmt =
+    IF (
+        ISBLANK ( _Ref ), "--:--:--",
+        FORMAT ( INT ( DIVIDE ( _Ref, 3600 ) ), "00" ) & ":"
+            & FORMAT ( INT ( DIVIDE ( MOD ( _Ref, 3600 ), 60 ) ), "00" ) & ":"
+            & FORMAT ( INT ( MOD ( _Ref, 60 ) ), "00" )
+    )
+
+VAR _HTML =
+    [BS2 CSS]
+        & "<div class=" & Q & "bs2" & Q & ">"
+        & "<div class=" & Q & "bn" & Q & "><div>"
+        & "<h1>Painel de Sinais Vitais | Atendimento</h1>"
+        & "<p>Visao consolidada para gestores de operacao &#183; fato_genesys (Genesys / Google BigQuery)</p>"
+        & "</div><div class=" & Q & "tag" & Q & ">Visao Gestor</div></div>"
+
+        & "<div class=" & Q & "kpis" & Q & ">"
+        & "<div class=" & Q & "kpi" & Q & "><div class=" & Q & "kl" & Q & ">Atendimentos Realizados</div>"
+        & "<div class=" & Q & "kv" & Q & ">" & _TotalFmt & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">Conversas distintas no periodo</div></div>"
+        & "<div class=" & Q & "kpi k2" & Q & "><div class=" & Q & "kl" & Q & ">TMA Consolidado</div>"
+        & "<div class=" & Q & "kv r" & Q & ">" & _TMA & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">conversation_end &#8722; conversation_start</div></div>"
+        & "<div class=" & Q & "kpi k5" & Q & "><div class=" & Q & "kl" & Q & ">Atendentes em Alerta</div>"
+        & "<div class=" & Q & "kv a" & Q & ">" & _Alerta & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">TMA entre 1,0x e 1,5x a media (" & _RefFmt & ")</div></div>"
+        & "<div class=" & Q & "kpi k3" & Q & "><div class=" & Q & "kl" & Q & ">Atendentes Criticos</div>"
+        & "<div class=" & Q & "kv r" & Q & ">" & _Critico & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">TMA igual ou acima de 1,5x a media</div></div>"
+        & "<div class=" & Q & "kpi k4" & Q & "><div class=" & Q & "kl" & Q & ">Atendentes Ativos</div>"
+        & "<div class=" & Q & "kv u" & Q & ">" & _AtendFmt & "</div>"
+        & "<div class=" & Q & "ks" & Q & ">" & _MediaAt & " atendimentos por atendente</div></div></div>"
+
+        & "<div class=" & Q & "fl" & Q & ">"
+        & "<div class=" & Q & "fi" & Q & "><span>Periodo</span><div>" & _Periodo & "</div></div>"
+        & "<div class=" & Q & "fi" & Q & "><span>Departamento</span><div>"
+        & IF ( ISFILTERED ( fato_genesys[department] ),
+                CONCATENATEX ( VALUES ( fato_genesys[department] ), fato_genesys[department], ", " ), "Todos" )
+        & "</div></div>"
+        & "<div class=" & Q & "fi" & Q & "><span>Canal (media_type)</span><div>"
+        & IF ( ISFILTERED ( fato_genesys[media_type] ),
+                CONCATENATEX ( VALUES ( fato_genesys[media_type] ), fato_genesys[media_type], ", " ), "Todos" )
+        & "</div></div>"
+        & "<div class=" & Q & "fi" & Q & "><span>Fila (name_queue)</span><div>"
+        & IF ( ISFILTERED ( fato_genesys[name_queue] ),
+                CONCATENATEX ( VALUES ( fato_genesys[name_queue] ), fato_genesys[name_queue], ", " ), "Todas" )
+        & "</div></div>"
+        & "<div class=" & Q & "fi" & Q & "><span>Proposito (purpose)</span><div>"
+        & IF ( ISFILTERED ( fato_genesys[purpose] ),
+                CONCATENATEX ( VALUES ( fato_genesys[purpose] ), fato_genesys[purpose], ", " ), "Todos" )
+        & "</div></div></div>"
+
+        & "<div class=" & Q & "grid" & Q & ">"
+        & "<div class=" & Q & "card" & Q & "><h2>Distribuicao por Canal</h2>"
+        & "<p class=" & Q & "cs" & Q & ">media_type</p>"
+        & "<table class=" & Q & "rk" & Q & ">" & _LinCanal & "</table></div>"
+        & "<div class=" & Q & "card" & Q & "><h2>Distribuicao por Departamento</h2>"
+        & "<p class=" & Q & "cs" & Q & ">department</p>"
+        & "<table class=" & Q & "rk" & Q & ">" & _LinDep & "</table></div></div>"
+
+        & "<div class=" & Q & "card full" & Q & "><h2>Evolucao de Chamados Abertos</h2>"
+        & "<p class=" & Q & "cs" & Q & ">Qtd mensal &#183; ultimos 12 meses</p>" & _Grafico & "</div>"
+
+        & "<div class=" & Q & "card full" & Q & "><h2>Atendentes em Monitoramento</h2>"
+        & "<p class=" & Q & "cs" & Q & ">participant_name &#183; Top 15 por volume &#183; "
+        & _AtendFmt & " atendente(s) na base</p>"
+        & "<table class=" & Q & "tb" & Q & "><tr><th>Atendente</th><th>Departamento</th><th>Fila</th>"
+        & "<th class=" & Q & "r" & Q & ">Atendimentos</th><th class=" & Q & "r" & Q & ">TMA</th>"
+        & "<th class=" & Q & "r" & Q & ">Score TMA</th><th>Status</th></tr>"
+        & _LinhasAt & "</table></div>"
+
+        & "<div class=" & Q & "ins" & Q & ">"
+        & "<div class=" & Q & "ic" & Q & "><h3>&#128161; Foco Operacional</h3><p>"
+        & _Critico & " atendente(s) classificados como criticos operam com TMA igual ou superior a 1,5x a media do portfolio ("
+        & _RefFmt & ") &#8212; priorizar coaching e revisao de script.</p></div>"
+        & "<div class=" & Q & "ic" & Q & "><h3>&#128161; Capacidade</h3><p>"
+        & _TotalFmt & " atendimentos distribuidos entre " & _AtendFmt & " atendentes ativos, media de "
+        & _MediaAt & " por atendente &#8212; avaliar redistribuicao entre filas.</p></div>"
+        & "<div class=" & Q & "ic" & Q & "><h3>&#128161; Atencao</h3><p>"
+        & _Alerta & " atendente(s) em faixa de monitoramento &#8212; acompanhar antes que migrem para a faixa critica.</p></div>"
+        & "</div>"
+
+        & "<div class=" & Q & "ft" & Q & "><span>Banco BS2 &#183; fato_genesys</span>"
+        & "<span>Status por TMA (PREMISSA): Normal &lt; media &#183; Monitorar &#8805; media &#183; Critico &#8805; 1,5x media</span>"
+        & "</div></div>"
+
+RETURN
+    IF (
+        ISBLANK ( _Total ) || _Total = 0,
+        [BS2 CSS] & "<div class=" & Q & "bs2" & Q & "><div class=" & Q & "card" & Q & "><div class="
+            & Q & "vz" & Q & ">Sem atendimentos para os filtros selecionados.</div></div></div>",
+        _HTML
+    )
