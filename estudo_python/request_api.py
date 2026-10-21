@@ -16,4 +16,4 @@ endpoint_product = "https://dummyjson.com/products/" # Variável que armazena os
 data_users = extrair_dados(endpoint_user) # Variável que armazena o resultado da função
 data_product = extrair_dados(endpoint_product) # Variável que armazena o resultado da função
 
-print(data_users)
+print(data_users) # Imprime o resultado
